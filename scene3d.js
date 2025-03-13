@@ -1,21 +1,25 @@
 import * as THREE from 'https://cdn.skypack.dev/three@0.136.0';
 import { OrbitControls } from 'https://cdn.skypack.dev/three@0.136.0/examples/jsm/controls/OrbitControls.js';
 import { GLTFLoader } from 'https://cdn.skypack.dev/three@0.136.0/examples/jsm/loaders/GLTFLoader.js';
+import { Water } from 'https://cdn.skypack.dev/three@0.136.0/examples/jsm/objects/Water.js';
 
-// Scene variables
-let scene, camera, renderer, controls;
+// Scene elements
+let scene, camera, renderer, controls, container;
 let gridAreas = [];
-let recordingStatus = null;
+let objects = [];
+let buckets = [];
+let recordingStatus;
 let isRecording = false;
+let recordingTimer;
 let recordedFrames = {};
-let bucket = null;
-let waterObjects = [];
 
 // Initialize the 3D scene
-export function initScene(container) {
+export function initScene(containerElement) {
+    container = containerElement;
+    
     // Create scene
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0e0e10);
+    scene.background = new THREE.Color(0x111111);
     
     // Create camera
     camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 1000);
@@ -31,22 +35,24 @@ export function initScene(container) {
     // Add orbit controls
     controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    controls.dampingFactor = 0.25;
+    controls.dampingFactor = 0.05;
     
-    // Add lights
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    // Add lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
     scene.add(ambientLight);
     
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
     directionalLight.position.set(5, 10, 5);
     directionalLight.castShadow = true;
+    directionalLight.shadow.mapSize.width = 1024;
+    directionalLight.shadow.mapSize.height = 1024;
     scene.add(directionalLight);
     
     // Add ground
     const groundGeometry = new THREE.PlaneGeometry(20, 20);
     const groundMaterial = new THREE.MeshStandardMaterial({ 
-        color: 0x554422,
-        roughness: 0.8
+        color: 0x554422, 
+        roughness: 0.8 
     });
     const ground = new THREE.Mesh(groundGeometry, groundMaterial);
     ground.rotation.x = -Math.PI / 2;
@@ -57,10 +63,10 @@ export function initScene(container) {
     const gridHelper = new THREE.GridHelper(20, 20);
     scene.add(gridHelper);
     
-    // Create status indicator
+    // Add recording status indicator
     recordingStatus = document.createElement('div');
     recordingStatus.className = 'recording-status';
-    recordingStatus.textContent = 'Ready';
+    recordingStatus.textContent = 'Not Recording';
     container.appendChild(recordingStatus);
     
     // Start animation loop
@@ -71,383 +77,416 @@ export function initScene(container) {
 function animate() {
     requestAnimationFrame(animate);
     
-    if (controls) controls.update();
+    // Update controls
+    controls.update();
     
-    // Animate water objects
-    waterObjects.forEach(water => {
-        if (water.userData.animating) {
-            water.position.y -= 0.05;
-            water.scale.y -= 0.01;
-            
-            if (water.scale.y <= 0) {
-                scene.remove(water);
-                waterObjects = waterObjects.filter(w => w !== water);
-            }
-        }
+    // Update objects
+    objects.forEach(obj => {
+        if (obj.update) obj.update();
     });
     
+    // Render
     renderer.render(scene, camera);
     
-    // Capture frames if recording
+    // Capture frame if recording
     if (isRecording) {
         captureGridFrames();
     }
 }
 
-// Setup grid for recording
+// Set up grid for recording
 export function setupRecordingGrid(rows = 2, cols = 2, height = 5, width = 5) {
-    // Clear existing grid areas
+    // Remove existing grid areas
     gridAreas.forEach(area => {
         scene.remove(area);
     });
     gridAreas = [];
     
-    const gridSize = Math.max(width, height);
+    // Calculate grid cell size
     const cellWidth = width / cols;
     const cellHeight = height / rows;
     
     // Create grid cells
     for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
-            const geometry = new THREE.BoxGeometry(cellWidth, 0.1, cellHeight);
-            const material = new THREE.MeshBasicMaterial({ 
-                color: 0x9147ff,
-                transparent: true,
-                opacity: 0.3
+            // Create grid cell
+            const areaGeometry = new THREE.PlaneGeometry(cellWidth, cellHeight);
+            const areaMaterial = new THREE.MeshBasicMaterial({ 
+                color: 0x9147ff, 
+                transparent: true, 
+                opacity: 0.2,
+                side: THREE.DoubleSide 
             });
+            const area = new THREE.Mesh(areaGeometry, areaMaterial);
+            area.rotation.x = -Math.PI / 2;
+            area.position.y = 0.01; // Slightly above ground
+            area.position.x = -width/2 + cellWidth/2 + col * cellWidth;
+            area.position.z = -height/2 + cellHeight/2 + row * cellHeight;
             
-            const gridArea = new THREE.Mesh(geometry, material);
-            gridArea.position.set(
-                col * cellWidth - (width / 2) + (cellWidth / 2),
-                0.05,
-                row * cellHeight - (height / 2) + (cellHeight / 2)
-            );
+            // Add metadata
+            area.userData = {
+                row,
+                col,
+                id: `grid_${row}_${col}`
+            };
             
-            // Add wireframe
-            const wireframe = new THREE.LineSegments(
-                new THREE.EdgesGeometry(geometry),
-                new THREE.LineBasicMaterial({ color: 0xffffff })
-            );
-            gridArea.add(wireframe);
+            // Store in array
+            gridAreas.push(area);
             
-            // Add ID for tracking
-            const id = `grid-${row}-${col}`;
-            gridArea.userData = { id, row, col };
+            // Add to scene
+            scene.add(area);
             
-            scene.add(gridArea);
-            gridAreas.push(gridArea);
+            // Initialize recorded frames for this grid area
+            recordedFrames[area.userData.id] = [];
         }
     }
+    
+    console.log(`Created ${rows}x${cols} grid for recording`);
 }
 
-// Add water surface
+// Add a water plane
 export function addWater() {
-    const geometry = new THREE.BoxGeometry(1, 0.2, 1);
-    const material = new THREE.MeshStandardMaterial({
-        color: 0x00ccff,
-        transparent: true,
-        opacity: 0.7
+    const waterGeometry = new THREE.PlaneGeometry(10, 10, 20, 20);
+    
+    const water = new Water(waterGeometry, {
+        textureWidth: 512,
+        textureHeight: 512,
+        waterNormals: new THREE.TextureLoader().load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/waternormals.jpg', function(texture) {
+            texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+        }),
+        sunDirection: new THREE.Vector3(0, 1, 0),
+        sunColor: 0xffffff,
+        waterColor: 0x001e0f,
+        distortionScale: 3.7
     });
     
-    const water = new THREE.Mesh(geometry, material);
-    water.position.set(0, 0.1, 0);
-    water.userData = { type: 'water', animating: false };
+    water.rotation.x = -Math.PI / 2;
+    water.position.y = 0.05; // Just above ground
+    
     scene.add(water);
-    waterObjects.push(water);
+    objects.push(water);
+    
+    // Add update method
+    water.update = function() {
+        water.material.uniforms['time'].value += 1.0 / 60.0;
+    };
     
     return water;
 }
 
-// Add bucket object
+// Add a simple bucket object
 export function addBucket(position = { x: 0, y: 1, z: 0 }) {
-    // Create a simple bucket
-    const bucketGroup = new THREE.Group();
+    // Create bucket group
+    const bucket = new THREE.Group();
     
-    // Bucket body
-    const bodyGeometry = new THREE.CylinderGeometry(0.5, 0.4, 1, 16);
-    const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0x888888 });
-    const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-    body.castShadow = true;
-    bucketGroup.add(body);
+    // Create bucket cylinder
+    const cylinderGeometry = new THREE.CylinderGeometry(0.5, 0.4, 1, 16);
+    const cylinderMaterial = new THREE.MeshStandardMaterial({ color: 0x8888ff });
+    const cylinder = new THREE.Mesh(cylinderGeometry, cylinderMaterial);
+    cylinder.castShadow = true;
+    bucket.add(cylinder);
     
-    // Bucket water
-    const waterGeometry = new THREE.CylinderGeometry(0.45, 0.35, 0.3, 16);
-    const waterMaterial = new THREE.MeshStandardMaterial({
-        color: 0x00ccff,
-        transparent: true,
-        opacity: 0.7
-    });
-    const water = new THREE.Mesh(waterGeometry, waterMaterial);
-    water.position.y = 0.3;
-    bucketGroup.add(water);
-    
-    // Bucket handle
+    // Create bucket handle
     const handleGeometry = new THREE.TorusGeometry(0.4, 0.05, 8, 16, Math.PI);
     const handleMaterial = new THREE.MeshStandardMaterial({ color: 0x444444 });
     const handle = new THREE.Mesh(handleGeometry, handleMaterial);
     handle.rotation.x = Math.PI / 2;
-    handle.position.y = 0.7;
-    bucketGroup.add(handle);
+    handle.position.y = 0.5;
+    handle.castShadow = true;
+    bucket.add(handle);
     
-    bucketGroup.position.set(position.x, position.y, position.z);
-    bucketGroup.userData = { type: 'bucket' };
+    // Set position
+    bucket.position.set(position.x, position.y, position.z);
     
-    // Add water pouring functionality
-    bucketGroup.pourWater = function() {
-        const water = addWater();
-        water.position.copy(this.position);
-        water.position.y -= 0.5;
-        water.userData.animating = true;
+    // Add pour water method
+    bucket.pourWater = function() {
+        // Create water particles
+        const particleCount = 50;
+        const particles = new THREE.Group();
+        
+        for (let i = 0; i < particleCount; i++) {
+            const particleGeometry = new THREE.SphereGeometry(0.05, 8, 8);
+            const particleMaterial = new THREE.MeshStandardMaterial({ color: 0x0077ff });
+            const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+            
+            // Set initial position
+            particle.position.x = (Math.random() - 0.5) * 0.3;
+            particle.position.y = -0.5;
+            particle.position.z = (Math.random() - 0.5) * 0.3;
+            
+            // Add metadata
+            particle.userData = {
+                velocity: new THREE.Vector3(0, -0.05 - Math.random() * 0.1, 0),
+                lifetime: 2 + Math.random() * 2
+            };
+            
+            particles.add(particle);
+        }
+        
+        // Add to bucket
+        bucket.add(particles);
+        
+        // Add update method for particles
+        particles.update = function() {
+            let allParticlesGone = true;
+            
+            particles.children.forEach(particle => {
+                // Update position
+                particle.position.add(particle.userData.velocity);
+                
+                // Reduce lifetime
+                particle.userData.lifetime -= 0.05;
+                
+                // Check if particle should be removed
+                if (particle.userData.lifetime <= 0) {
+                    particles.remove(particle);
+                } else {
+                    allParticlesGone = false;
+                }
+            });
+            
+            // Remove particles group if all particles are gone
+            if (allParticlesGone && particles.children.length === 0) {
+                bucket.remove(particles);
+                objects.splice(objects.indexOf(particles), 1);
+            }
+        };
+        
+        // Add to objects array for updates
+        objects.push(particles);
     };
     
-    scene.add(bucketGroup);
-    bucket = bucketGroup;
+    // Add to scene
+    scene.add(bucket);
+    objects.push(bucket);
+    buckets.push(bucket);
     
-    return bucketGroup;
+    return bucket;
 }
 
-// Load 3D model
+// Get the first bucket in the scene
+export function getBucket() {
+    return buckets.length > 0 ? buckets[0] : null;
+}
+
+// Load a 3D model
 export function loadModel(url, position = { x: 0, y: 0, z: 0 }, scale = 1) {
     const loader = new GLTFLoader();
     
-    loader.load(url, (gltf) => {
+    loader.load(url, function(gltf) {
         const model = gltf.scene;
+        
+        // Set position and scale
         model.position.set(position.x, position.y, position.z);
         model.scale.set(scale, scale, scale);
         
-        model.traverse((child) => {
-            if (child.isMesh) {
-                child.castShadow = true;
-                child.receiveShadow = true;
-            }
-        });
-        
+        // Add to scene
         scene.add(model);
-    }, undefined, (error) => {
+        objects.push(model);
+        
+        console.log('Model loaded:', url);
+    }, undefined, function(error) {
         console.error('Error loading model:', error);
     });
 }
 
-// Get bucket object
-export function getBucket() {
-    return bucket;
+// Capture frames from grid areas
+function captureGridFrames() {
+    // Temporarily hide recording status for clean capture
+    recordingStatus.style.opacity = '0';
+    
+    // Create temporary canvas for rendering
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = 112;
+    tempCanvas.height = 112;
+    const tempCtx = tempCanvas.getContext('2d');
+    
+    // Capture each grid area
+    gridAreas.forEach(area => {
+        // Create a camera specifically for this grid area
+        const gridCamera = camera.clone();
+        
+        // Position camera to look down at the grid area
+        const centerPosition = new THREE.Vector3().copy(area.position);
+        centerPosition.y += 5; // Move up 5 units
+        
+        gridCamera.position.copy(centerPosition);
+        gridCamera.lookAt(area.position);
+        
+        // Render the scene from this camera's perspective
+        renderer.setSize(112, 112);
+        renderer.render(scene, gridCamera);
+        
+        // Get the image data
+        tempCtx.drawImage(renderer.domElement, 0, 0, 112, 112);
+        
+        // Store the frame
+        const frame = tempCtx.getImageData(0, 0, 112, 112);
+        
+        // Store with limited frame count to prevent memory issues
+        const frames = recordedFrames[area.userData.id];
+        frames.push(frame);
+        
+        // Limit the number of frames to prevent memory issues
+        if (frames.length > 60) {
+            frames.shift(); // Remove oldest frame
+        }
+    });
+    
+    // Reset renderer size
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    
+    // Show recording status again
+    recordingStatus.style.opacity = '1';
 }
 
-// Start recording GIFs for each grid area
+// Start recording process
 export function startRecording(duration = 3) {
-    if (isRecording) return; // Already recording
+    // Check if already recording
+    if (isRecording) {
+        console.log('Already recording');
+        return;
+    }
     
-    isRecording = true;
-    recordedFrames = {};
-    
-    // Initialize frames arrays for each grid
+    // Clear previous recordings
     gridAreas.forEach(area => {
         recordedFrames[area.userData.id] = [];
     });
     
     // Update status
-    if (recordingStatus) {
-        recordingStatus.textContent = 'Recording...';
-        recordingStatus.classList.add('active');
-    }
+    isRecording = true;
+    recordingStatus.textContent = 'Recording...';
+    recordingStatus.classList.add('active');
     
-    // Set timeout to stop recording
-    setTimeout(() => {
+    console.log(`Started recording for ${duration} seconds`);
+    
+    // Set timer to stop recording
+    recordingTimer = setTimeout(() => {
         stopRecording();
     }, duration * 1000);
 }
 
-// Capture frames for each grid area
-function captureGridFrames() {
-    // Limit frame capture rate to prevent crashes
-    const maxFramesPerArea = 30;
+// Stop recording and generate GIFs
+function stopRecording() {
+    // Check if recording
+    if (!isRecording) {
+        return;
+    }
     
-    gridAreas.forEach(area => {
-        const areaId = area.userData.id;
-        
-        // Skip if we already have enough frames for this area
-        if (recordedFrames[areaId] && recordedFrames[areaId].length >= maxFramesPerArea) {
+    // Update status
+    isRecording = false;
+    recordingStatus.textContent = 'Processing...';
+    
+    console.log('Stopped recording, processing GIFs...');
+    
+    // Clear timer
+    clearTimeout(recordingTimer);
+    
+    // Process each grid area with a delay to prevent browser from freezing
+    let areaIndex = 0;
+    
+    function processNextArea() {
+        if (areaIndex >= gridAreas.length) {
+            // All areas processed
+            recordingStatus.textContent = 'Not Recording';
+            recordingStatus.classList.remove('active');
             return;
         }
         
-        try {
-            // Calculate bounds for the grid area in 3D space
-            const halfWidth = area.geometry.parameters.width / 2;
-            const halfDepth = area.geometry.parameters.depth / 2;
-            
-            const bounds = {
-                minX: area.position.x - halfWidth,
-                maxX: area.position.x + halfWidth,
-                minZ: area.position.z - halfDepth,
-                maxZ: area.position.z + halfDepth
-            };
-            
-            // Create a temporary camera positioned at the area looking down
-            const tempCamera = camera.clone();
-            tempCamera.position.set(
-                area.position.x,
-                camera.position.y,
-                area.position.z
-            );
-            tempCamera.lookAt(area.position.x, 0, area.position.z);
-            
-            // Create temporary renderer for this frame
-            const tempRenderer = new THREE.WebGLRenderer({ 
-                antialias: true,
-                preserveDrawingBuffer: true 
-            });
-            tempRenderer.setSize(112, 112);
-            tempRenderer.render(scene, tempCamera);
-            
-            // Get frame data
-            const frameData = tempRenderer.domElement.toDataURL('image/png');
-            recordedFrames[areaId].push(frameData);
-            
-            // Dispose temporary renderer to free memory
-            tempRenderer.dispose();
-            
-        } catch (error) {
-            console.error(`Error capturing frame for ${areaId}:`, error);
+        const area = gridAreas[areaIndex];
+        const frames = recordedFrames[area.userData.id];
+        
+        if (frames.length > 0) {
+            generateGif(area, frames);
         }
+        
+        areaIndex++;
+        setTimeout(processNextArea, 500); // Add a delay between processing each area
+    }
+    
+    // Start processing
+    processNextArea();
+}
+
+// Generate GIF from frames
+function generateGif(area, frames) {
+    // Create a GIF for this area
+    const gif = new GIF({
+        workers: 2,
+        quality: 5,
+        width: 112,
+        height: 112,
+        workerScript: URL.createObjectURL(window.gifWorkerBlob)
     });
+    
+    // Create temporary canvas for processing frames
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = 112;
+    tempCanvas.height = 112;
+    const tempCtx = tempCanvas.getContext('2d');
+    
+    // Add frames to GIF with reduced frame count for better performance
+    const frameStep = Math.max(1, Math.floor(frames.length / 30)); // Limit to ~30 frames
+    
+    for (let i = 0; i < frames.length; i += frameStep) {
+        tempCtx.putImageData(frames[i], 0, 0);
+        gif.addFrame(tempCanvas, { copy: true, delay: 1000 / 15 }); // 15fps
+    }
+    
+    // When GIF is finished
+    gif.on('finished', function(blob) {
+        // Create URL for the GIF
+        const url = URL.createObjectURL(blob);
+        
+        // Add to gallery
+        addToGallery(url, `Grid ${area.userData.row},${area.userData.col}`);
+        
+        console.log(`Generated GIF for grid ${area.userData.row},${area.userData.col}`);
+    });
+    
+    // Start rendering GIF
+    gif.render();
 }
 
-// Stop recording and generate GIFs
-function stopRecording() {
-    isRecording = false;
+// Add GIF to gallery
+function addToGallery(url, title) {
+    const gallery = document.getElementById('gifGallery');
     
-    // Update status
-    if (recordingStatus) {
-        recordingStatus.textContent = 'Processing...';
-    }
+    const item = document.createElement('div');
+    item.className = 'gif-item';
     
-    // Get GIF worker blob from app.js (shared resource)
-    let gifWorkerBlob = window.gifWorkerBlob;
+    const img = document.createElement('img');
+    img.src = url;
+    img.className = 'preview-canvas';
     
-    if (!gifWorkerBlob) {
-        // Fallback if gifWorkerBlob is not available
-        fetch('https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js')
-            .then(response => response.blob())
-            .then(blob => {
-                gifWorkerBlob = blob;
-                processGifs(gifWorkerBlob);
-            });
-    } else {
-        processGifs(gifWorkerBlob);
-    }
+    const titleEl = document.createElement('div');
+    titleEl.className = 'gif-title';
+    titleEl.textContent = title;
+    
+    const downloadBtn = document.createElement('button');
+    downloadBtn.textContent = 'Download';
+    downloadBtn.addEventListener('click', () => {
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `grid-${title.replace(' ', '-')}.gif`;
+        link.click();
+    });
+    
+    item.appendChild(img);
+    item.appendChild(titleEl);
+    item.appendChild(downloadBtn);
+    
+    gallery.appendChild(item);
 }
 
-// Process recorded frames into GIFs
-function processGifs(workerBlob) {
-    let completedGifs = 0;
-    const totalGifs = Object.keys(recordedFrames).length;
-    
-    // Process each grid area's frames into a GIF
-    for (const [areaId, frames] of Object.entries(recordedFrames)) {
-        if (frames.length === 0) {
-            completedGifs++;
-            continue;
-        }
+// Handle window resize
+window.addEventListener('resize', () => {
+    if (container && renderer && camera) {
+        // Update camera aspect ratio
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
         
-        // Find the corresponding grid area
-        const area = gridAreas.find(a => a.userData.id === areaId);
-        if (!area) continue;
-        
-        try {
-            // Process in batches to avoid browser crash
-            const batchSize = 5;
-            const gif = new GIF({
-                workers: 2,
-                quality: 10,
-                width: 112,
-                height: 112,
-                workerScript: URL.createObjectURL(workerBlob)
-            });
-            
-            // Add frames in batches
-            const addFramesInBatches = (startIdx = 0) => {
-                const endIdx = Math.min(startIdx + batchSize, frames.length);
-                
-                for (let i = startIdx; i < endIdx; i++) {
-                    const img = new Image();
-                    img.src = frames[i];
-                    
-                    img.onload = function() {
-                        gif.addFrame(img, { delay: 100, copy: true });
-                        
-                        // If this is the last frame in the batch or overall
-                        if (i === endIdx - 1) {
-                            if (endIdx < frames.length) {
-                                // Process next batch
-                                setTimeout(() => addFramesInBatches(endIdx), 100);
-                            } else {
-                                // All frames added, render the GIF
-                                gif.render();
-                            }
-                        }
-                    };
-                }
-            };
-            
-            // Start processing frames
-            addFramesInBatches();
-            
-            // Handle GIF completion
-            gif.on('finished', function(blob) {
-                completedGifs++;
-                
-                // Create a URL for the GIF
-                const url = URL.createObjectURL(blob);
-                
-                // Add to gallery
-                const gallery = document.getElementById('gifGallery');
-                if (gallery) {
-                    const item = document.createElement('div');
-                    item.className = 'gif-item';
-                    
-                    const gifPreview = document.createElement('img');
-                    gifPreview.src = url;
-                    gifPreview.className = 'preview-canvas';
-                    
-                    const gifTitle = document.createElement('div');
-                    gifTitle.className = 'gif-title';
-                    gifTitle.textContent = `Grid ${area.userData.row}-${area.userData.col}`;
-                    
-                    const downloadBtn = document.createElement('button');
-                    downloadBtn.textContent = 'Download';
-                    downloadBtn.onclick = function() {
-                        const link = document.createElement('a');
-                        link.href = url;
-                        link.download = `grid-${area.userData.row}-${area.userData.col}.gif`;
-                        link.click();
-                    };
-                    
-                    item.appendChild(gifPreview);
-                    item.appendChild(gifTitle);
-                    item.appendChild(downloadBtn);
-                    gallery.appendChild(item);
-                }
-                
-                // Update status when all GIFs are done
-                if (completedGifs >= totalGifs && recordingStatus) {
-                    recordingStatus.textContent = 'Completed';
-                    recordingStatus.classList.remove('active');
-                    
-                    // Clean up after 5 seconds to prevent memory leaks
-                    setTimeout(() => {
-                        recordingStatus.textContent = 'Ready';
-                    }, 5000);
-                }
-            });
-            
-        } catch (error) {
-            console.error(`Error processing GIF for ${areaId}:`, error);
-            completedGifs++;
-            
-            if (completedGifs >= totalGifs && recordingStatus) {
-                recordingStatus.textContent = 'Error';
-                recordingStatus.classList.remove('active');
-            }
-        }
+        // Update renderer size
+        renderer.setSize(container.clientWidth, container.clientHeight);
     }
-}
+});
