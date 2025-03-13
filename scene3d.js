@@ -12,6 +12,8 @@ let recordingStatus;
 let isRecording = false;
 let recordingTimer;
 let recordedFrames = {};
+let livePreviewGif = null;
+let livePreviewTimer = null;
 
 // Initialize the 3D scene
 export function initScene(containerElement) {
@@ -69,8 +71,123 @@ export function initScene(containerElement) {
     recordingStatus.textContent = 'Not Recording';
     container.appendChild(recordingStatus);
     
+    // Create live preview element
+    createLivePreview();
+    
     // Start animation loop
     animate();
+}
+
+// Create live preview element
+function createLivePreview() {
+    const livePreviewContainer = document.createElement('div');
+    livePreviewContainer.className = 'live-preview-container';
+    livePreviewContainer.innerHTML = `
+        <h4>Live Preview</h4>
+        <div id="scene3dLivePreview" class="live-preview"></div>
+    `;
+    
+    // Add to DOM after the scene container
+    container.parentNode.insertBefore(livePreviewContainer, container.nextSibling);
+    
+    // Start live preview
+    startLivePreview();
+}
+
+// Start live preview generation
+function startLivePreview() {
+    // Clear previous timer
+    if (livePreviewTimer) {
+        clearTimeout(livePreviewTimer);
+    }
+    
+    // Generate preview initially
+    generateLivePreview();
+    
+    // Then update every 5 seconds
+    livePreviewTimer = setInterval(generateLivePreview, 5000);
+}
+
+// Generate live preview GIF
+function generateLivePreview() {
+    if (!window.gifWorkerBlob) {
+        console.error('GIF Worker Blob not available');
+        return;
+    }
+    
+    // Create a GIF
+    const gif = new GIF({
+        workers: 1,
+        quality: 5,
+        width: 112,
+        height: 112,
+        workerScript: URL.createObjectURL(window.gifWorkerBlob)
+    });
+    
+    // Take 10 quick snapshots of the scene
+    const framesNeeded = 10;
+    let frameCount = 0;
+    
+    function captureFrame() {
+        if (frameCount >= framesNeeded) {
+            // All frames captured, render the GIF
+            gif.render();
+            return;
+        }
+        
+        // Slightly rotate the camera for dynamic preview
+        camera.position.x = 5 * Math.cos(frameCount * 0.2);
+        camera.position.z = 5 * Math.sin(frameCount * 0.2);
+        camera.lookAt(0, 0, 0);
+        controls.update();
+        
+        // Update objects
+        objects.forEach(obj => {
+            if (obj.update) obj.update();
+        });
+        
+        // Render at a smaller size
+        const originalSize = { 
+            width: renderer.domElement.width, 
+            height: renderer.domElement.height 
+        };
+        renderer.setSize(112, 112);
+        renderer.render(scene, camera);
+        
+        // Add frame to GIF
+        gif.addFrame(renderer.domElement, { copy: true, delay: 200 });
+        
+        // Restore renderer size
+        renderer.setSize(originalSize.width, originalSize.height);
+        
+        // Continue with next frame
+        frameCount++;
+        setTimeout(captureFrame, 10);
+    }
+    
+    // Start capturing frames
+    captureFrame();
+    
+    // When GIF is done
+    gif.on('finished', function(blob) {
+        // Clean up previous GIF if exists
+        if (livePreviewGif) {
+            URL.revokeObjectURL(livePreviewGif);
+        }
+        
+        // Create URL for the new GIF
+        livePreviewGif = URL.createObjectURL(blob);
+        
+        // Display in live preview container
+        const previewContainer = document.getElementById('scene3dLivePreview');
+        if (previewContainer) {
+            previewContainer.innerHTML = '';
+            const img = document.createElement('img');
+            img.src = livePreviewGif;
+            img.className = 'preview-canvas';
+            previewContainer.appendChild(img);
+        }
+    });
 }
 
 // Animation loop
@@ -92,56 +209,6 @@ function animate() {
     if (isRecording) {
         captureGridFrames();
     }
-}
-
-// Set up grid for recording
-export function setupRecordingGrid(rows = 2, cols = 2, height = 5, width = 5) {
-    // Remove existing grid areas
-    gridAreas.forEach(area => {
-        scene.remove(area);
-    });
-    gridAreas = [];
-    
-    // Calculate grid cell size
-    const cellWidth = width / cols;
-    const cellHeight = height / rows;
-    
-    // Create grid cells
-    for (let row = 0; row < rows; row++) {
-        for (let col = 0; col < cols; col++) {
-            // Create grid cell
-            const areaGeometry = new THREE.PlaneGeometry(cellWidth, cellHeight);
-            const areaMaterial = new THREE.MeshBasicMaterial({ 
-                color: 0x9147ff, 
-                transparent: true, 
-                opacity: 0.2,
-                side: THREE.DoubleSide 
-            });
-            const area = new THREE.Mesh(areaGeometry, areaMaterial);
-            area.rotation.x = -Math.PI / 2;
-            area.position.y = 0.01; // Slightly above ground
-            area.position.x = -width/2 + cellWidth/2 + col * cellWidth;
-            area.position.z = -height/2 + cellHeight/2 + row * cellHeight;
-            
-            // Add metadata
-            area.userData = {
-                row,
-                col,
-                id: `grid_${row}_${col}`
-            };
-            
-            // Store in array
-            gridAreas.push(area);
-            
-            // Add to scene
-            scene.add(area);
-            
-            // Initialize recorded frames for this grid area
-            recordedFrames[area.userData.id] = [];
-        }
-    }
-    
-    console.log(`Created ${rows}x${cols} grid for recording`);
 }
 
 // Add a water plane
@@ -290,6 +357,56 @@ export function loadModel(url, position = { x: 0, y: 0, z: 0 }, scale = 1) {
     });
 }
 
+// Set up grid for recording
+export function setupRecordingGrid(rows = 2, cols = 2, height = 5, width = 5) {
+    // Remove existing grid areas
+    gridAreas.forEach(area => {
+        scene.remove(area);
+    });
+    gridAreas = [];
+    
+    // Calculate grid cell size
+    const cellWidth = width / cols;
+    const cellHeight = height / rows;
+    
+    // Create grid cells
+    for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+            // Create grid cell
+            const areaGeometry = new THREE.PlaneGeometry(cellWidth, cellHeight);
+            const areaMaterial = new THREE.MeshBasicMaterial({ 
+                color: 0x9147ff, 
+                transparent: true, 
+                opacity: 0.2,
+                side: THREE.DoubleSide 
+            });
+            const area = new THREE.Mesh(areaGeometry, areaMaterial);
+            area.rotation.x = -Math.PI / 2;
+            area.position.y = 0.01; // Slightly above ground
+            area.position.x = -width/2 + cellWidth/2 + col * cellWidth;
+            area.position.z = -height/2 + cellHeight/2 + row * cellHeight;
+            
+            // Add metadata
+            area.userData = {
+                row,
+                col,
+                id: `grid_${row}_${col}`
+            };
+            
+            // Store in array
+            gridAreas.push(area);
+            
+            // Add to scene
+            scene.add(area);
+            
+            // Initialize recorded frames for this grid area
+            recordedFrames[area.userData.id] = [];
+        }
+    }
+    
+    console.log(`Created ${rows}x${cols} grid for recording`);
+}
+
 // Capture frames from grid areas
 function captureGridFrames() {
     // Temporarily hide recording status for clean capture
@@ -300,6 +417,15 @@ function captureGridFrames() {
     tempCanvas.width = 112;
     tempCanvas.height = 112;
     const tempCtx = tempCanvas.getContext('2d');
+    
+    // Store original renderer size
+    const originalSize = { 
+        width: renderer.domElement.width, 
+        height: renderer.domElement.height 
+    };
+    
+    // Set renderer to capture size
+    renderer.setSize(112, 112);
     
     // Capture each grid area
     gridAreas.forEach(area => {
@@ -314,18 +440,21 @@ function captureGridFrames() {
         gridCamera.lookAt(area.position);
         
         // Render the scene from this camera's perspective
-        renderer.setSize(112, 112);
         renderer.render(scene, gridCamera);
         
         // Get the image data
+        tempCtx.clearRect(0, 0, 112, 112);
         tempCtx.drawImage(renderer.domElement, 0, 0, 112, 112);
         
-        // Store the frame
-        const frame = tempCtx.getImageData(0, 0, 112, 112);
+        // Clone the image data to avoid reference issues
+        const imageData = new ImageData(
+            new Uint8ClampedArray(tempCtx.getImageData(0, 0, 112, 112).data),
+            112, 112
+        );
         
-        // Store with limited frame count to prevent memory issues
+        // Store the frame
         const frames = recordedFrames[area.userData.id];
-        frames.push(frame);
+        frames.push(imageData);
         
         // Limit the number of frames to prevent memory issues
         if (frames.length > 60) {
@@ -334,7 +463,7 @@ function captureGridFrames() {
     });
     
     // Reset renderer size
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setSize(originalSize.width, originalSize.height);
     
     // Show recording status again
     recordingStatus.style.opacity = '1';
@@ -488,5 +617,16 @@ window.addEventListener('resize', () => {
         
         // Update renderer size
         renderer.setSize(container.clientWidth, container.clientHeight);
+    }
+});
+
+// Clean up resources when page is unloaded
+window.addEventListener('beforeunload', () => {
+    if (livePreviewTimer) {
+        clearInterval(livePreviewTimer);
+    }
+    
+    if (livePreviewGif) {
+        URL.revokeObjectURL(livePreviewGif);
     }
 });
